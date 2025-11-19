@@ -67,15 +67,103 @@ Edit `config.json` to configure storage paths:
 
 ## HTCondor Execute Node Storage
 
-**Important**: Reconstruction jobs now run on HTCondor execute nodes using local scratch space, not on AFS:
+**Critical Understanding**: Reconstruction jobs now run on HTCondor execute nodes using local scratch space, **not on AFS**. This is a key design feature that prevents disk quota issues.
 
-- **Database files** (~100MB each): Stored on execute node's local disk during job execution
-- **Root files**: Processed on execute node's local disk during job execution
-- **Automatic cleanup**: Execute node storage is automatically cleaned up by HTCondor after job completion
-- **AFS impact**: Minimal - only final output files and logs are stored on AFS
-- **No quota issues**: Up to 50 jobs can run concurrently without consuming AFS quota
+### How Execute Node Storage Works
 
-This design prevents disk quota issues by keeping large temporary files (database, intermediate root files) on the execute node's local disk, which typically has much more space than AFS.
+When a reconstruction job starts on an HTCondor execute node:
+
+1. **Job initialization**: HTCondor assigns a temporary working directory on the execute node's local disk
+   - Typical location: `/tmp/` or `$_CONDOR_SCRATCH_DIR`
+   - Each job gets its own isolated workspace
+   - No interaction with AFS quota during job execution
+
+2. **Database file handling**: 
+   - The `aligndb_copy.sh` script copies the alignment database (~100MB) to execute node local disk
+   - Database is used locally during reconstruction
+   - No AFS space consumed for this temporary copy
+   - Database is deleted when job completes
+
+3. **Intermediate files**:
+   - ROOT file processing happens on execute node's local disk
+   - Temporary files created during reconstruction stay on execute node
+   - Execute node typically has 10s-100s GB of scratch space available
+
+4. **Output file transfer**:
+   - Only final output files (kfalignment_*.root, xAOD_*.root) are transferred back
+   - Files go to EOS (if configured) or AFS work directory
+   - Log files transferred to AFS logs directory
+   - Small files, manageable for AFS quota
+
+5. **Automatic cleanup**:
+   - HTCondor automatically cleans up execute node storage after job completion
+   - Temporary files, database copies, and scratch space are all removed
+   - No manual cleanup needed
+   - No persistent storage consumption on execute nodes
+
+### Capacity and Scalability
+
+**Why this design matters:**
+- **50+ concurrent jobs**: Can run simultaneously without AFS quota issues
+- **100MB × 50 = 5GB**: Database files would consume 5GB on AFS if stored there
+- **Execute node capacity**: Typically 50-200 GB of local scratch space per node
+- **Zero AFS impact during execution**: Jobs don't touch AFS during reconstruction
+
+**Example scenario:**
+```
+Running 50 reconstruction jobs in parallel:
+- Old design (on AFS): 5GB database files + intermediate files = AFS quota exceeded
+- New design (execute node): 0 bytes on AFS during execution, only ~500MB final output
+```
+
+### Verifying Execute Node Usage
+
+**Check that jobs are using execute node storage:**
+
+```bash
+# Method 1: Check job output logs
+grep "Work directory for this job" Y2023_R011705_F400-450/iter01/1reco/logs/reco_*.out
+# Should show paths like: /tmp/condor-XYZ or $_CONDOR_SCRATCH_DIR
+
+# Method 2: While job is running, check job working directory
+condor_q -long <job_id> | grep "^Iwd"
+# Should show execute node path, not AFS path
+
+# Method 3: Check HTCondor job sandbox
+condor_ssh_to_job <job_id> pwd
+# Should show execute node local path
+```
+
+**If jobs are not using execute node storage:**
+- Check submit file for `should_transfer_files` setting
+- Verify `initial_dir` is not set to AFS path
+- Review environment script for hardcoded AFS paths
+
+### Storage Flow Diagram
+
+```
+[Raw Data on EOS] 
+       ↓
+[HTCondor Job Starts]
+       ↓
+[Execute Node Local Disk]
+  - Database copy (~100MB)
+  - Intermediate files
+  - Temporary ROOT files
+       ↓
+[Reconstruction Process]
+       ↓
+[Output Files Generated]
+       ↓
+[Transfer to EOS/AFS]
+  - kfalignment_*.root
+  - xAOD_*.root  
+  - Log files
+       ↓
+[Execute Node Cleanup]
+  - All temporary files deleted
+  - Local storage freed
+```
 
 ## Directory Structure
 

@@ -20,22 +20,143 @@
 
 ## 迁移步骤
 
+### 前提条件
+
+迁移之前，请确保您具备：
+- [ ] 访问 CERN lxplus
+- [ ] Calypso 已安装且可访问
+- [ ] Pede 已安装（见下面的安装说明）
+- [ ] 足够的存储配额（AFS：约 500MB，EOS：10 次迭代约 25GB）
+- [ ] 停止任何正在运行的 `auto_iter.py` 守护进程
+
+**检查正在运行的守护进程：**
+```bash
+# 查找任何 auto_iter.py 进程
+ps aux | grep auto_iter.py
+
+# 如果找到，记下 PID 并停止它：
+kill <pid>
+
+# 验证它已停止
+ps aux | grep auto_iter.py
+```
+
 ### 步骤 1：初始设置
 
-**创建配置文件：**
+**1.1 创建配置文件：**
 
 ```bash
-# 交互式设置（推荐）
+# 方法 1：交互式设置（推荐首次使用者）
 bash setup_config.sh
+# 按照提示输入您的路径
 
-# 或手动设置
-python config.py
+# 方法 2：手动设置（适合有经验的用户）
+python3 config.py
 # 然后编辑 config.json 设置您的路径
+nano config.json
+```
+
+**1.2 验证配置：**
+
+```bash
+# 验证路径和设置
+python3 -c "from config import AlignmentConfig; c = AlignmentConfig(); c.validate_paths()"
+
+# 检查配置内容
+cat config.json
+```
+
+**1.3 示例 config.json：**
+```json
+{
+  "paths": {
+    "calypso_install": "/afs/cern.ch/user/y/yourusername/calypso/install",
+    "pede_install": "/afs/cern.ch/user/y/yourusername/pede",
+    "env_script": "reco_condor_env.sh",
+    "work_dir": "/afs/cern.ch/user/y/yourusername/alignment-work",
+    "eos_output_dir": "/eos/user/y/yourusername/faser-alignment-output"
+  },
+  "htcondor": {
+    "job_flavour": "longlunch",
+    "request_cpus": 1,
+    "max_retries": 3,
+    "requirements": "(Machine =!= LastRemoteHost) && (OpSysAndVer =?= \"AlmaLinux9\")"
+  },
+  "storage": {
+    "use_eos_for_output": true,
+    "keep_intermediate_root_files": true,
+    "cleanup_reco_temp_files": true
+  },
+  "alignment": {
+    "default_iterations": 10,
+    "polling_interval_seconds": 300
+  }
+}
 ```
 
 配置文件替代了 `auto_iter.py` 中的硬编码路径。
 
-### 步骤 2：转换您的命令
+### 步骤 2：安装/验证依赖项
+
+**2.1 验证 Calypso 安装：**
+```bash
+# 检查 Calypso 是否可访问
+ls -la /afs/cern.ch/user/y/yourusername/calypso/install/
+
+# 验证设置脚本存在
+ls -la /afs/cern.ch/user/y/yourusername/calypso/install/setup.sh
+```
+
+**2.2 安装 pede（如果尚未安装）：**
+```bash
+# 克隆 pede 仓库
+git clone --depth 1 --branch V04-17-06 \
+     https://gitlab.desy.de/claus.kleinwort/millepede-ii.git \
+     /afs/cern.ch/user/y/yourusername/pede
+
+# 构建 pede
+cd /afs/cern.ch/user/y/yourusername/pede
+make pede
+
+# 测试安装
+./pede -t
+# 应该成功完成并显示测试输出
+
+# 返回工作目录
+cd -
+```
+
+**2.3 编译 Mille：**
+```bash
+cd /afs/cern.ch/user/y/yourusername/faser-alignment-script/millepede
+cmake -B build && cmake --build build && cmake --install build
+cd -
+```
+
+**2.4 创建/验证环境脚本：**
+```bash
+# 如果不存在，创建它：
+cat > reco_condor_env.sh << 'EOF'
+#!/bin/bash
+export ATLAS_LOCAL_ROOT_BASE=/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase
+source ${ATLAS_LOCAL_ROOT_BASE}/user/atlasLocalSetup.sh
+asetup --input=calypso/asetup.faser Athena,24.0.41
+source /afs/cern.ch/user/y/yourusername/calypso/install/setup.sh
+export PATH=/afs/cern.ch/user/y/yourusername/pede:$PATH
+export LD_LIBRARY_PATH=/afs/cern.ch/user/y/yourusername/pede:$LD_LIBRARY_PATH
+EOF
+
+chmod +x reco_condor_env.sh
+
+# 测试环境脚本
+source reco_condor_env.sh
+which pede
+# 应该输出：/afs/cern.ch/user/y/yourusername/pede/pede
+```
+
+### 步骤 3：转换您的命令
+
+现在您可以将旧的守护进程命令转换为新的 DAGman 方法。
 
 **旧命令：**
 ```bash
@@ -44,10 +165,35 @@ nohup python3 auto_iter.py -y 2023 -r 011705 -f 450-500 -i 10 &>>auto_iter.log &
 
 **新命令：**
 ```bash
-python dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
+python3 dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
 ```
 
-### 步骤 3：命令行参数
+**变化内容：**
+- ❌ 删除了 `nohup` - 不再需要，DAGman 管理工作流
+- ❌ 删除了 `&>>auto_iter.log &` - DAGman 有自己的日志记录
+- ✅ 将脚本从 `auto_iter.py` 改为 `dag_manager.py`
+- ✅ 添加了 `--submit` 标志 - 生成后自动提交 DAG
+- ✅ 所有其他参数保持不变
+
+**首次迁移（测试运行）：**
+```bash
+# 从小测试开始以验证一切正常
+python3 dag_manager.py -y 2023 -r 011705 -f 450-453 -i 2 --submit
+
+# 监控测试
+condor_q -dag
+
+# 检查日志
+tail -f Y2023_R011705_F450-453/alignment.dag.dagman.out
+```
+
+**成功测试后：**
+```bash
+# 运行完整的生产工作流
+python3 dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
+```
+
+### 步骤 4：命令行参数
 
 所有参数保持不变：
 
@@ -64,33 +210,71 @@ python dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
 - `--config`：指定自定义配置文件
 - `--submit`：生成后自动提交 DAG
 
-### 步骤 4：监控您的作业
+### 步骤 5：监控您的作业
 
-**旧方法：**
+使用 DAGman 的监控方法完全不同且更强大。
+
+**旧方法（基于守护进程）：**
 ```bash
 # 监控守护进程日志
 tail -f auto_iter.log
 
 # 检查守护进程是否在运行
 ps aux | grep auto_iter.py
+
+# 没有工作流进度的结构化视图
+# 需要手动解析日志
 ```
 
-**新方法：**
+**新方法（基于 DAGman）：**
 ```bash
-# 检查整体状态
+# 1. 检查整体作业状态
 condor_q
 
-# 查看详细 DAG 状态
+# 示例输出：
+# -- Schedd: lxplus123.cern.ch : <188.185.123.123:9618?... @ 12/15/23 14:30:21
+# OWNER    BATCH_NAME       SUBMITTED   DONE   RUN    IDLE  TOTAL JOB_IDS
+# username alignment.dag   12/15 14:28      5      3      2     10 12345.0 ... 12354.0
+
+# 2. 查看详细的 DAG 结构和节点状态
 condor_q -dag
 
-# 监控 DAGman 日志
+# 示例输出：
+# ID       OWNER      DAG_NodeName          STATUS
+# 12345.0  username   reco_01_0            DONE
+# 12345.1  username   reco_01_1            DONE
+# 12345.2  username   reco_01_2            RUNNING
+# 12345.3  username   millepede_01         IDLE
+# 12345.4  username   reco_02_0            IDLE
+
+# 3. 查看作业而不批处理（详细视图）
+condor_q -nobatch
+
+# 4. 实时监控 DAGman 日志
 tail -f Y2023_R011705_F450-500/alignment.dag.dagman.out
 
-# 检查作业历史
-condor_history <username>
+# 5. 检查作业历史（已完成的作业）
+condor_history <username> -limit 20
+
+# 6. 检查特定作业详情
+condor_q -long <job_id>
+
+# 7. 仅检查运行中的作业
+condor_q -run
+
+# 8. 仅检查空闲作业
+condor_q -idle
 ```
 
-### 步骤 5：处理问题
+**新监控的好处：**
+- ✅ 实时工作流可视化
+- ✅ 清晰的父子作业关系
+- ✅ 每次迭代的状态跟踪
+- ✅ 内置 HTCondor 工具
+- ✅ 标准日志格式
+- ✅ 易于故障排除
+
+### 步骤 6：处理问题
 
 **旧方法：**
 ```bash
