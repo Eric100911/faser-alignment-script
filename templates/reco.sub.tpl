@@ -1,9 +1,9 @@
-# HTCondor submit file for reconstruction job (file {file_str})
+# HTCondor submit file for reconstruction jobs (iteration {iter})
 universe = vanilla
 executable = {exe_path}
 
-output = {out_path}
-error  = {err_path}
+output = {logs_dir}/reco_iter{iter}_$(file_str).out
+error  = {logs_dir}/reco_iter{iter}_$(file_str).err
 log    = {log_path}
 
 request_cpus = 2
@@ -18,5 +18,6 @@ on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
 max_retries = 3
 requirements = (Machine =!= LastRemoteHost) && (OpSysAndVer =?= "AlmaLinux9")
 
-arguments = {year} {run} {stations} {file_str} {reco_dir} {kfalign_dir} {src_dir} {calypso_asetup} {calypso_setup}
-queue
+arguments = {year} {run} {stations} $(file_str) {reco_dir} {kfalign_dir} {src_dir} {calypso_asetup} {calypso_setup}
+queue file_str from (
+{file_list})

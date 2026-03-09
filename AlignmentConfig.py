@@ -8,18 +8,49 @@ type checking for alignment workflow parameters.
 """
 
 from pathlib import Path
+from typing import Optional
 
 from Config import Config
 from RawList import RawList
 
 
-# class IterSet():
-#     """Set of iteration identifiers."""
-    
-#     def __init__(self, iters: int):
-#         self._iters: int = iters
-#         self._comment: str = 
-    
+class WorkflowSet:
+    """
+    Represents one set of iterations in the alignment workflow.
+
+    Each set has a fixed number of iterations and one or more Millepede
+    steps (with different parameter-fixing rules) that run inside each
+    iteration after the reconstruction step.
+    """
+
+    def __init__(self, name: str, data: dict):
+        """
+        Initialize a workflow set from its JSON data dictionary.
+
+        Args:
+            name:  The set identifier (e.g. 'set0', 'set1').
+            data:  The raw dict for this set from config.json, expected to
+                   contain at least 'iters' and optionally 'comment'/'pede'.
+
+        Raises:
+            KeyError:  If required field 'iters' is missing.
+            TypeError: If 'iters' is not an integer.
+        """
+        self.name: str = name
+        self.iters: int = int(data['iters'])
+        self.comment: str = data.get('comment', '')
+        # pede_steps: steps sorted by name for deterministic ordering
+        pede_data: dict = data.get('pede', {})
+        self.pede_steps: dict[str, list] = {
+            k: pede_data[k] for k in sorted(pede_data.keys())
+        }
+        if not self.pede_steps:
+            # Default: single empty step so the mille job always has a name
+            self.pede_steps = {'step0': []}
+
+    def __repr__(self) -> str:
+        return f"WorkflowSet({self.name!r}, iters={self.iters}, steps={list(self.pede_steps)})"
+
 
 
 class AlignmentConfig(Config):
@@ -66,9 +97,11 @@ class AlignmentConfig(Config):
     
     @property
     def iters(self) -> int:
-        """Get iterations integer from configuration."""
-        iters = self._get_int(self.raw.iters)
-        return int(iters)
+        """Total iterations: sum of all workflow-set iters, or fallback to raw.iters."""
+        sets = self.workflow_sets
+        if sets:
+            return sum(ws.iters for ws in sets)
+        return int(self._get_int(self.raw.iters))
     
     @property
     def stations(self) -> int:
@@ -88,8 +121,48 @@ class AlignmentConfig(Config):
                                stations=self.stations)
     
     # ============================ Workflow info =============================
-    # def workflow(self) 
-    
+
+    @property
+    def workflow_sets(self) -> list:
+        """
+        Parse the 'workflow' section into an ordered list of WorkflowSet objects.
+
+        Returns an empty list when the 'workflow' key is absent so that
+        callers can always iterate unconditionally.
+        """
+        if 'workflow' not in self._config:
+            return []
+        data: dict = self._config['workflow']
+        sets = []
+        for key in sorted(data.keys()):
+            if key.startswith('set'):
+                sets.append(WorkflowSet(key, data[key]))
+        return sets
+
+    def iter_info(self, global_iter: int) -> tuple:
+        """
+        Return the (WorkflowSet, local_iter) pair for a given global iteration.
+
+        Args:
+            global_iter: 0-based absolute iteration index across all sets.
+
+        Returns:
+            Tuple of (WorkflowSet, int) where the second element is the
+            0-based index of this iteration within its workflow set.
+
+        Raises:
+            ValueError: If global_iter is out of range.
+        """
+        offset = 0
+        for ws in self.workflow_sets:
+            if global_iter < offset + ws.iters:
+                return ws, global_iter - offset
+            offset += ws.iters
+        raise ValueError(
+            f"Iteration {global_iter} is out of range "
+            f"(total {self.iters} iterations in workflow)."
+        )
+
     # ============================== Source info ==============================
     
     @property
@@ -127,30 +200,29 @@ class AlignmentConfig(Config):
                               ensure=True,
                               iter=iter_str)
     
-    def dag_recojob(self, iteration: int, file_str: str) -> str:
-        """Get job name for reconstruction."""
+    def dag_recojob(self, iteration: int) -> str:
+        """Get job name for reconstruction (one job per iteration)."""
         iter_str = f"{iteration:02d}"
-        return self._get_str(self.dag.iter.recojob,
-                             iter=iter_str, file=file_str)
+        return self._get_str(self.dag.iter.recojob, iter=iter_str)
     
-    def dag_recosub(self, iteration: int, file_str: str) -> Path:
-        """Get path for reconstruction submit file."""
+    def dag_recosub(self, iteration: int) -> Path:
+        """Get path for reconstruction submit file (one file per iteration)."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.recosub,
                               base_path=self.dag_iter_dir(iteration),
-                              iter=iter_str, file=file_str)
+                              iter=iter_str)
     
-    def dag_millejob(self, iteration: int) -> str:
-        """Get job name for millepede."""
+    def dag_millejob(self, iteration: int, step: str) -> str:
+        """Get job name for a millepede step."""
         iter_str = f"{iteration:02d}"
-        return self._get_str(self.dag.iter.millejob, iter=iter_str)
+        return self._get_str(self.dag.iter.millejob, iter=iter_str, step=step)
     
-    def dag_millesub(self, iteration: int) -> Path:
-        """Get path for millepede submit file."""
+    def dag_millesub(self, iteration: int, step: str) -> Path:
+        """Get path for a millepede step submit file."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.millesub,
                               base_path=self.dag_iter_dir(iteration),
-                              iter=iter_str)
+                              iter=iter_str, step=step)
     
     def logs_dir(self, iteration: int) -> Path:
         """Get logs directory for a specific iteration."""
@@ -160,47 +232,33 @@ class AlignmentConfig(Config):
                               ensure=True,
                               iter=iter_str)
     
-    def logs_reco_err(self, iteration: int, file_str: str) -> Path:
-        """Get path for reconstruction error log file."""
-        iter_str = f"{iteration:02d}"
-        return self._get_path(self.dag.iter.logs.recoerr,
-                              base_path=self.logs_dir(iteration),
-                              iter=iter_str, file=file_str)
-    
-    def logs_reco_log(self, iteration: int, file_str: str) -> Path:
-        """Get path for reconstruction log file."""
+    def logs_reco_log(self, iteration: int) -> Path:
+        """Get path for the reconstruction cluster log file (one per iteration)."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.logs.recolog,
                               base_path=self.logs_dir(iteration),
-                              iter=iter_str, file=file_str)
+                              iter=iter_str)
     
-    def logs_reco_out(self, iteration: int, file_str: str) -> Path:
-        """Get path for reconstruction output log file."""
-        iter_str = f"{iteration:02d}"
-        return self._get_path(self.dag.iter.logs.recoout,
-                              base_path=self.logs_dir(iteration),
-                              iter=iter_str, file=file_str)
-    
-    def logs_mille_err(self, iteration: int) -> Path:
-        """Get path for millepede error log file."""
+    def logs_mille_err(self, iteration: int, step: str) -> Path:
+        """Get path for millepede error log file for a given step."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.logs.milleerr,
                               base_path=self.logs_dir(iteration),
-                              iter=iter_str)
+                              iter=iter_str, step=step)
     
-    def logs_mille_log(self, iteration: int) -> Path:
-        """Get path for millepede log file."""
+    def logs_mille_log(self, iteration: int, step: str) -> Path:
+        """Get path for millepede log file for a given step."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.logs.millelog,
                               base_path=self.logs_dir(iteration),
-                              iter=iter_str)
+                              iter=iter_str, step=step)
     
-    def logs_mille_out(self, iteration: int) -> Path:
-        """Get path for millepede output log file."""
+    def logs_mille_out(self, iteration: int, step: str) -> Path:
+        """Get path for millepede output log file for a given step."""
         iter_str = f"{iteration:02d}"
         return self._get_path(self.dag.iter.logs.milleout,
                               base_path=self.logs_dir(iteration),
-                              iter=iter_str)
+                              iter=iter_str, step=step)
     
     # =============================== Data info ===============================
     

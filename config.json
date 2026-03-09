@@ -38,18 +38,16 @@
     "milleexe": "runMillepede.sh",
     "iter": {
       "dir": "iter{iter}",
-      "recojob": "reco_iter{iter}_{file}",
-      "recosub": "reco_iter{iter}_{file}.sub",
-      "millejob": "millepede_iter{iter}",
-      "millesub": "millepede_iter{iter}.sub",
+      "recojob": "reco_iter{iter}",
+      "recosub": "reco_iter{iter}.sub",
+      "millejob": "millepede_iter{iter}_{step}",
+      "millesub": "millepede_iter{iter}_{step}.sub",
       "logs": {
         "dir": "logs_iter{iter}",
-        "recoerr": "reco_iter{iter}_{file}.err",
-        "recolog": "reco_iter{iter}_{file}.log",
-        "recoout": "reco_iter{iter}_{file}.out",
-        "milleerr": "millepede_iter{iter}.err",
-        "millelog": "millepede_iter{iter}.log",
-        "milleout": "millepede_iter{iter}.out"
+        "recolog": "reco_iter{iter}.log",
+        "milleerr": "millepede_iter{iter}_{step}.err",
+        "millelog": "millepede_iter{iter}_{step}.log",
+        "milleout": "millepede_iter{iter}_{step}.out"
       }
     }
   },
