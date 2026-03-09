@@ -38,7 +38,7 @@
     "milleexe": "runMillepede.sh",
     "iter": {
       "dir": "iter{iter}",
-      "recojob": "reco_iter{iter}",
+      "recojob": "reco_iter{iter}_{file}",
       "recosub": "reco_iter{iter}.sub",
       "millejob": "millepede_iter{iter}_{step}",
       "millesub": "millepede_iter{iter}_{step}.sub",

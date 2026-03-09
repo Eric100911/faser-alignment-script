@@ -200,10 +200,11 @@ class AlignmentConfig(Config):
                               ensure=True,
                               iter=iter_str)
     
-    def dag_recojob(self, iteration: int) -> str:
-        """Get job name for reconstruction (one job per iteration)."""
+    def dag_recojob(self, iteration: int, file_str: str) -> str:
+        """Get job name for a reconstruction job (one per file per iteration)."""
         iter_str = f"{iteration:02d}"
-        return self._get_str(self.dag.iter.recojob, iter=iter_str)
+        return self._get_str(self.dag.iter.recojob,
+                             iter=iter_str, file=file_str)
     
     def dag_recosub(self, iteration: int) -> Path:
         """Get path for reconstruction submit file (one file per iteration)."""

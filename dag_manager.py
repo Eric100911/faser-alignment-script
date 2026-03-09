@@ -79,18 +79,16 @@ class DAGManager:
         shutil.copy(self.config.tpl_recoexe, dag_recoexe)
     
     def create_reco_submit_files(self) -> None:
-        """Create one reco submit file per iteration (all files via HTCondor queue)."""
+        """Create one reco submit file per iteration (file_str injected via DAG VARS)."""
         with open(self.config.tpl_recosub, 'r') as tpl_file:
             tpl_content = tpl_file.read()
         for it in range(self.config.iters):
             iter_str = f"{it:02d}"
-            file_list = "\n".join(self.config.files)
             sub_content = tpl_content.format(
                 iter=iter_str,
                 year=self.config.year,
                 run=self.config.run,
                 stations=self.config.stations,
-                file_list=file_list,
                 exe_path=self.config.dag_recoexe,
                 log_path=self.config.logs_reco_log(it),
                 logs_dir=self.config.logs_dir(it),
@@ -162,11 +160,15 @@ class DAGManager:
             ws, _ = self.config.iter_info(it)
             step_names = list(ws.pede_steps.keys())
 
-            # ---- reco job (single submit file, all files via queue) ----
+            # ---- reco jobs: one JOB node per file, all sharing the same submit file ----
+            # DAGman VARS injects the file_str macro into each node's submit call
+            # so that rescue DAGs re-run only the individual file nodes that failed.
             reco_sub = self.config.dag_recosub(it)
-            reco_job = self.config.dag_recojob(it)
-            dag_content += f"# Iteration {it} reconstruction job\n"
-            dag_content += f"JOB {reco_job} {reco_sub}\n"
+            dag_content += f"# Iteration {it} reconstruction jobs\n"
+            for file_str in self.config.files:
+                reco_job = self.config.dag_recojob(it, file_str)
+                dag_content += f"JOB {reco_job} {reco_sub}\n"
+                dag_content += f"VARS {reco_job} file_str=\"{file_str}\"\n"
 
             # ---- millepede steps ----
             dag_content += f"\n# Iteration {it} millepede jobs\n"
@@ -177,28 +179,33 @@ class DAGManager:
 
             # ---- dependencies ----
             dag_content += f"\n# Iteration {it} dependencies\n"
-            # reco → first mille step
             first_mille = self.config.dag_millejob(it, step_names[0])
-            dag_content += f"PARENT {reco_job} CHILD {first_mille}\n"
+            # every reco file job → first mille step
+            for file_str in self.config.files:
+                reco_job = self.config.dag_recojob(it, file_str)
+                dag_content += f"PARENT {reco_job} CHILD {first_mille}\n"
             # mille step[k] → mille step[k+1]
             for k in range(len(step_names) - 1):
                 parent_j = self.config.dag_millejob(it, step_names[k])
                 child_j  = self.config.dag_millejob(it, step_names[k + 1])
                 dag_content += f"PARENT {parent_j} CHILD {child_j}\n"
-            # previous iteration's last mille → current reco
+            # previous iteration's last mille → all current reco jobs
             if it != 0:
                 prev_ws, _ = self.config.iter_info(it - 1)
                 prev_steps = list(prev_ws.pede_steps.keys())
                 last_mille = self.config.dag_millejob(it - 1, prev_steps[-1])
-                dag_content += f"PARENT {last_mille} CHILD {reco_job}\n"
+                for file_str in self.config.files:
+                    reco_job = self.config.dag_recojob(it, file_str)
+                    dag_content += f"PARENT {last_mille} CHILD {reco_job}\n"
             dag_content += "\n"
 
         # Add retry settings
         dag_content += "# Retry settings\n"
         for it in range(total):
             ws, _ = self.config.iter_info(it)
-            reco_job = self.config.dag_recojob(it)
-            dag_content += f"RETRY {reco_job} 2\n"
+            for file_str in self.config.files:
+                reco_job = self.config.dag_recojob(it, file_str)
+                dag_content += f"RETRY {reco_job} 2\n"
             for step_name in ws.pede_steps.keys():
                 mille_job = self.config.dag_millejob(it, step_name)
                 dag_content += f"RETRY {mille_job} 1\n"

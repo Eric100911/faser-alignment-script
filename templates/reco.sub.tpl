@@ -19,5 +19,4 @@ max_retries = 3
 requirements = (Machine =!= LastRemoteHost) && (OpSysAndVer =?= "AlmaLinux9")
 
 arguments = {year} {run} {stations} $(file_str) {reco_dir} {kfalign_dir} {src_dir} {calypso_asetup} {calypso_setup}
-queue file_str from (
-{file_list})
+queue 1

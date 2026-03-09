@@ -5,7 +5,7 @@ Unit tests for the workflow-aware DAG generation.
 These tests exercise:
   - WorkflowSet parsing from config data
   - AlignmentConfig.workflow_sets / iters / iter_info
-  - Single reco submit file per iteration (queue-from-list)
+  - Single reco submit file per iteration ($(file_str) via DAGman VARS)
   - Per-step millepede submit files
   - Correct DAG dependency structure
 """
@@ -35,8 +35,7 @@ RECO_TPL = (
     "log    = {log_path}\n"
     "arguments = {year} {run} {stations} $(file_str)"
     " {reco_dir} {kfalign_dir} {src_dir} {calypso_asetup} {calypso_setup}\n"
-    "queue file_str from (\n"
-    "{file_list})\n"
+    "queue 1\n"
 )
 
 MILLE_TPL = (
@@ -108,7 +107,7 @@ def _make_config(tmp_path, env, workflow: dict, raw_iters: int = 5,
             "milleexe": "runMillepede.sh",
             "iter": {
                 "dir": "iter{iter}",
-                "recojob": "reco_iter{iter}",
+                "recojob": "reco_iter{iter}_{file}",
                 "recosub": "reco_iter{iter}.sub",
                 "millejob": "millepede_iter{iter}_{step}",
                 "millesub": "millepede_iter{iter}_{step}.sub",
@@ -281,6 +280,11 @@ class TestRecoSubmitFiles:
     }
 
     def test_one_reco_sub_per_iteration(self, tmp_path, env):
+        """One shared submit file per iteration, not per file.
+
+        This keeps the filesystem clean by avoiding N_files × N_iters submit files.
+        The file_str variable is injected per-job via DAGman VARS instead.
+        """
         cfg_path = _make_config(tmp_path, env, self.WORKFLOW_2ITER,
                                 files="100-103")
         config  = AlignmentConfig(cfg_path)
@@ -296,31 +300,8 @@ class TestRecoSubmitFiles:
         sub_files = list(config.dag_dir.rglob("reco_iter*.sub"))
         assert len(sub_files) == 2, f"Expected 2 reco sub files, got {len(sub_files)}"
 
-    def test_reco_sub_contains_all_files(self, tmp_path, env):
-        """The single reco submit file must list all file numbers.
-
-        RawList('100-103') is exclusive-end: files 100, 101, 102 only.
-        """
-        cfg_path = _make_config(tmp_path, env, self.WORKFLOW_2ITER,
-                                files="100-103")
-        config  = AlignmentConfig(cfg_path)
-        manager = DAGManager(config)
-        manager.create_data_dirs()
-        manager.create_dag_dirs()
-        import shutil as _shutil
-        _shutil.copy(config.tpl_recoexe, config.dag_recoexe)
-
-        manager.create_reco_submit_files()
-
-        sub_path = config.dag_recosub(0)
-        content  = sub_path.read_text()
-        # files 100-103 (exclusive end) → 00100, 00101, 00102; NOT 00103
-        assert "00100" in content
-        assert "00101" in content
-        assert "00102" in content
-        assert "00103" not in content
-
-    def test_reco_sub_uses_queue_from_syntax(self, tmp_path, env):
+    def test_reco_sub_uses_queue_1(self, tmp_path, env):
+        """The submit file must use 'queue 1' (file injected via DAG VARS)."""
         cfg_path = _make_config(tmp_path, env, self.WORKFLOW_2ITER,
                                 files="100-102")
         config  = AlignmentConfig(cfg_path)
@@ -333,7 +314,7 @@ class TestRecoSubmitFiles:
         manager.create_reco_submit_files()
 
         content = config.dag_recosub(0).read_text()
-        assert "queue file_str from" in content
+        assert "queue 1" in content
 
     def test_reco_sub_uses_htcondor_variable(self, tmp_path, env):
         """output/error lines must use the HTCondor $(file_str) variable."""
@@ -350,6 +331,29 @@ class TestRecoSubmitFiles:
 
         content = config.dag_recosub(0).read_text()
         assert "$(file_str)" in content
+
+    def test_reco_sub_does_not_hardcode_file_numbers(self, tmp_path, env):
+        """The submit file must NOT contain hardcoded file numbers.
+
+        File identifiers are injected per-job via DAGman VARS, allowing the
+        same submit file to be reused for all files in an iteration.
+        """
+        cfg_path = _make_config(tmp_path, env, self.WORKFLOW_2ITER,
+                                files="100-103")
+        config  = AlignmentConfig(cfg_path)
+        manager = DAGManager(config)
+        manager.create_data_dirs()
+        manager.create_dag_dirs()
+        import shutil as _shutil
+        _shutil.copy(config.tpl_recoexe, config.dag_recoexe)
+
+        manager.create_reco_submit_files()
+
+        content = config.dag_recosub(0).read_text()
+        # Files 100-103 (exclusive end) → 00100, 00101, 00102 should NOT be hardcoded
+        assert "00100" not in content
+        assert "00101" not in content
+        assert "00102" not in content
 
 
 # ===========================================================================
@@ -447,24 +451,46 @@ class TestDagFile:
         dag_path = manager.create_dag_file()
         return dag_path.read_text(), config
 
-    def test_dag_has_one_reco_job_per_iteration(self, tmp_path, env):
+    def test_dag_has_one_reco_job_per_file_per_iteration(self, tmp_path, env):
+        """files=100-102 (exclusive end) → 2 files (00100, 00101) × 6 iters = 12 reco JOB entries."""
         content, config = self._build_dag(tmp_path, env)
-        total = config.iters  # 6
+        total_iters = config.iters  # 6
+        n_files = len(list(config.files))  # 2
         reco_jobs = [line for line in content.splitlines()
                      if line.startswith("JOB reco_iter")]
-        assert len(reco_jobs) == total
+        assert len(reco_jobs) == total_iters * n_files
 
-    def test_dag_reco_job_names_no_file(self, tmp_path, env):
-        """Job names for reco must NOT contain a file number."""
+    def test_dag_reco_job_names_include_file(self, tmp_path, env):
+        """Each per-file JOB name must contain the file number."""
         content, _ = self._build_dag(tmp_path, env)
         for line in content.splitlines():
             if line.startswith("JOB reco_iter"):
                 job_name = line.split()[1]
-                # old format had file numbers like 00100; new format has none
+                # Format: reco_iterNN_FFFFF
                 parts = job_name.split("_")
-                assert len(parts) == 2, (
-                    f"Reco job name should be 'reco_iterNN', got: {job_name}"
+                assert len(parts) == 3, (
+                    f"Reco job name should be 'reco_iterNN_FFFFF', got: {job_name}"
                 )
+
+    def test_dag_vars_macro_per_file(self, tmp_path, env):
+        """Each reco JOB node must have a matching VARS line with file_str."""
+        content, _ = self._build_dag(tmp_path, env)
+        vars_lines = [line for line in content.splitlines()
+                      if line.startswith("VARS reco_iter")]
+        job_lines  = [line for line in content.splitlines()
+                      if line.startswith("JOB reco_iter")]
+        # One VARS per JOB
+        assert len(vars_lines) == len(job_lines)
+        # Each VARS line injects file_str
+        for vline in vars_lines:
+            assert 'file_str="' in vline
+
+    def test_dag_vars_macro_values_match_files(self, tmp_path, env):
+        """VARS file_str values should match the configured raw files."""
+        content, config = self._build_dag(tmp_path, env, files="100-102")
+        files = list(config.files)  # ["00100", "00101"]
+        for f in files:
+            assert f'file_str="{f}"' in content
 
     def test_dag_mille_steps_per_iteration(self, tmp_path, env):
         content, config = self._build_dag(tmp_path, env)
@@ -473,39 +499,67 @@ class TestDagFile:
                       if line.startswith("JOB millepede_iter")]
         assert len(mille_jobs) == 8  # 4 + 2 + 2
 
-    def test_dag_reco_parent_of_first_mille_step(self, tmp_path, env):
-        """reco_iter00 must be the parent of millepede_iter00_step0."""
-        content, _ = self._build_dag(tmp_path, env)
-        assert "PARENT reco_iter00 CHILD millepede_iter00_step0" in content
+    def test_dag_reco_file_parent_of_first_mille_step(self, tmp_path, env):
+        """Each per-file reco job must be a parent of millepede step0."""
+        content, _ = self._build_dag(tmp_path, env, files="100-102")
+        assert "PARENT reco_iter00_00100 CHILD millepede_iter00_step0" in content
+        assert "PARENT reco_iter00_00101 CHILD millepede_iter00_step0" in content
 
     def test_dag_mille_step0_parent_of_step1(self, tmp_path, env):
         content, _ = self._build_dag(tmp_path, env)
         assert "PARENT millepede_iter00_step0 CHILD millepede_iter00_step1" in content
 
-    def test_dag_last_mille_step_parent_of_next_reco(self, tmp_path, env):
-        content, _ = self._build_dag(tmp_path, env)
-        # set0 has step0 and step1; iter00's step1 must precede iter01's reco
-        assert "PARENT millepede_iter00_step1 CHILD reco_iter01" in content
+    def test_dag_last_mille_step_parent_of_next_reco_files(self, tmp_path, env):
+        """Last mille step of an iter must be parent of ALL file jobs in next iter."""
+        content, _ = self._build_dag(tmp_path, env, files="100-102")
+        # set0: step1 is last; iter00's step1 must precede both file jobs of iter01
+        assert "PARENT millepede_iter00_step1 CHILD reco_iter01_00100" in content
+        assert "PARENT millepede_iter00_step1 CHILD reco_iter01_00101" in content
 
     def test_dag_cross_set_dependency(self, tmp_path, env):
-        """Last iter of set0 (step1) must precede first reco of set1."""
-        content, _ = self._build_dag(tmp_path, env)
+        """Last iter of set0 (step1) must precede all reco files of iter 2 (set1)."""
+        content, _ = self._build_dag(tmp_path, env, files="100-102")
         # set0: iters 0-1; set1: iters 2-3
-        # iter01 last mille (step1) → iter02 reco
-        assert "PARENT millepede_iter01_step1 CHILD reco_iter02" in content
+        # iter01 last mille (step1) → iter02 reco files
+        assert "PARENT millepede_iter01_step1 CHILD reco_iter02_00100" in content
+        assert "PARENT millepede_iter01_step1 CHILD reco_iter02_00101" in content
 
     def test_dag_retry_settings_present(self, tmp_path, env):
-        content, config = self._build_dag(tmp_path, env)
-        assert "RETRY reco_iter00 2" in content
+        content, config = self._build_dag(tmp_path, env, files="100-102")
+        assert "RETRY reco_iter00_00100 2" in content
+        assert "RETRY reco_iter00_00101 2" in content
         assert "RETRY millepede_iter00_step0 1" in content
 
     def test_dag_single_set_single_step(self, tmp_path, env):
-        """Regression: single-set, single-step workflow (old behaviour)."""
+        """Regression: single-set, single-step workflow."""
         wf = {"set0": {"iters": 3, "pede": {"step0": []}}}
-        content, config = self._build_dag(tmp_path, env, workflow=wf)
+        content, config = self._build_dag(tmp_path, env, workflow=wf,
+                                          files="100-101")
         assert config.iters == 3
-        assert "PARENT reco_iter00 CHILD millepede_iter00_step0" in content
-        assert "PARENT millepede_iter00_step0 CHILD reco_iter01" in content
+        assert "PARENT reco_iter00_00100 CHILD millepede_iter00_step0" in content
+        assert "PARENT millepede_iter00_step0 CHILD reco_iter01_00100" in content
+
+    def test_dag_rescue_only_failed_files_rerun(self, tmp_path, env):
+        """
+        Verify structural property: N_files independent JOB entries per iteration.
+
+        Each file is its own DAG node (JOB + VARS), so a rescue DAG re-runs
+        only the failed file nodes, not the entire iteration's cluster.
+        This test checks the count of independent JOB entries that enables
+        this per-file rescue behavior.
+        """
+        content, config = self._build_dag(tmp_path, env, files="100-104")
+        n_files = len(list(config.files))  # 4: 00100..00103
+        n_iters = config.iters  # 6
+
+        reco_jobs = [line for line in content.splitlines()
+                     if line.startswith("JOB reco_iter")]
+        # Each file is a separate JOB node → rescue re-runs only failed ones
+        assert len(reco_jobs) == n_files * n_iters
+
+        # Verify that each file in iter00 is a separate JOB (not grouped)
+        iter00_jobs = [l for l in reco_jobs if "reco_iter00_" in l]
+        assert len(iter00_jobs) == n_files
 
 
 # ===========================================================================
@@ -514,3 +568,4 @@ class TestDagFile:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
