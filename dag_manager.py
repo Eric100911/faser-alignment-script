@@ -79,32 +79,31 @@ class DAGManager:
         shutil.copy(self.config.tpl_recoexe, dag_recoexe)
     
     def create_reco_submit_files(self) -> None:
-        """Create reco submit files for all iterations and raw files."""
+        """Create one reco submit file per iteration (file_str injected via DAG VARS)."""
+        with open(self.config.tpl_recosub, 'r') as tpl_file:
+            tpl_content = tpl_file.read()
         for it in range(self.config.iters):
-            for file_str in self.config.files:
-                with open(self.config.tpl_recosub, 'r') as tpl_file:
-                    tpl_content = tpl_file.read()
-                sub_content = tpl_content.format(
-                    year=self.config.year,
-                    run=self.config.run,
-                    stations=self.config.stations,
-                    file_str=file_str,
-                    exe_path=self.config.dag_recoexe,
-                    out_path=self.config.logs_reco_out(it, file_str),
-                    err_path=self.config.logs_reco_err(it, file_str),
-                    log_path=self.config.logs_reco_log(it, file_str),
-                    reco_dir=self.config.reco_dir(it),
-                    kfalign_dir=self.config.kfalign_dir(it),
-                    src_dir=self.config.src_dir,
-                    calypso_asetup=self.config.env_calypso_asetup,
-                    calypso_setup=self.config.env_calypso_setup,
-                )
-                recosub = self.config.dag_recosub(it, file_str)
-                if recosub.exists():
-                    ColorfulPrint.print_yellow(f"Warning: ")
-                    print(f"Overwritting reco submit file: {recosub}")
-                with open(recosub, 'w') as sub_file:
-                    sub_file.write(sub_content)
+            iter_str = f"{it:02d}"
+            sub_content = tpl_content.format(
+                iter=iter_str,
+                year=self.config.year,
+                run=self.config.run,
+                stations=self.config.stations,
+                exe_path=self.config.dag_recoexe,
+                log_path=self.config.logs_reco_log(it),
+                logs_dir=self.config.logs_dir(it),
+                reco_dir=self.config.reco_dir(it),
+                kfalign_dir=self.config.kfalign_dir(it),
+                src_dir=self.config.src_dir,
+                calypso_asetup=self.config.env_calypso_asetup,
+                calypso_setup=self.config.env_calypso_setup,
+            )
+            recosub = self.config.dag_recosub(it)
+            if recosub.exists():
+                ColorfulPrint.print_yellow(f"Warning: ")
+                print(f"Overwritting reco submit file: {recosub}")
+            with open(recosub, 'w') as sub_file:
+                sub_file.write(sub_content)
 
     def create_mille_exe_files(self) -> None:
         """Create millepede executable script in DAG directory."""
@@ -115,62 +114,102 @@ class DAGManager:
         shutil.copy(self.config.tpl_milleexe, dag_milleexe)
     
     def create_mille_submit_files(self) -> None:
-        """Create millepede submit files for all iterations."""
-        for it in range(self.config.iters):
-            with open(self.config.tpl_millesub, 'r') as tpl_file:
-                tpl_content = tpl_file.read()
-            sub_content = tpl_content.format(
-                exe_path=self.config.dag_milleexe,
-                out_path=self.config.logs_mille_out(it),
-                err_path=self.config.logs_mille_err(it),
-                log_path=self.config.logs_mille_log(it),
-                to_next_iter=(it < self.config.iters - 1),
-                src_dir=self.config.src_dir,
-                kfalign_dir=self.config.kfalign_dir(it),
-                next_reco_dir=self.config.reco_dir(it + 1) if it < self.config.iters - 1 else "",
-                env_pede=self.config.env_pede,
-                env_root=self.config.env_root
-            )
-            millesub = self.config.dag_millesub(it)
-            if millesub.exists():
-                ColorfulPrint.print_yellow(f"Warning: ")
-                print(f"Overwritting millepede submit file: {millesub}")
-            with open(millesub, 'w') as sub_file:
-                sub_file.write(sub_content)
+        """Create millepede submit files for every workflow step of every iteration."""
+        with open(self.config.tpl_millesub, 'r') as tpl_file:
+            tpl_content = tpl_file.read()
+        total = self.config.iters
+        for it in range(total):
+            ws, _ = self.config.iter_info(it)
+            step_names = list(ws.pede_steps.keys())
+            for step_idx, step_name in enumerate(step_names):
+                is_final_step = (step_idx == len(step_names) - 1)
+                # Only the final step within an iteration feeds the next reco
+                to_next = is_final_step and (it < total - 1)
+                fix_items = ws.pede_steps[step_name]
+                fix_rules = ",".join(str(x) for x in fix_items)
+                sub_content = tpl_content.format(
+                    iter=f"{it:02d}",
+                    step=step_name,
+                    exe_path=self.config.dag_milleexe,
+                    out_path=self.config.logs_mille_out(it, step_name),
+                    err_path=self.config.logs_mille_err(it, step_name),
+                    log_path=self.config.logs_mille_log(it, step_name),
+                    to_next_iter=to_next,
+                    src_dir=self.config.src_dir,
+                    kfalign_dir=self.config.kfalign_dir(it),
+                    next_reco_dir=(
+                        self.config.reco_dir(it + 1) if to_next else ""
+                    ),
+                    env_pede=self.config.env_pede,
+                    env_root=self.config.env_root,
+                    fix_rules=fix_rules,
+                )
+                millesub = self.config.dag_millesub(it, step_name)
+                if millesub.exists():
+                    ColorfulPrint.print_yellow(f"Warning: ")
+                    print(f"Overwritting millepede submit file: {millesub}")
+                with open(millesub, 'w') as sub_file:
+                    sub_file.write(sub_content)
 
     def create_dag_file(self) -> Path:
         """Create DAG file for complete alignment workflow."""
         dag_file = self.config.dag_file
         dag_content = "# HTCondor DAG for FASER alignment workflow\n\n"
-        for it in range(self.config.iters):
-            # reco jobs
+        total = self.config.iters
+        for it in range(total):
+            ws, _ = self.config.iter_info(it)
+            step_names = list(ws.pede_steps.keys())
+
+            # ---- reco jobs: one JOB node per file, all sharing the same submit file ----
+            # DAGman VARS injects the file_str macro into each node's submit call
+            # so that rescue DAGs re-run only the individual file nodes that failed.
+            reco_sub = self.config.dag_recosub(it)
             dag_content += f"# Iteration {it} reconstruction jobs\n"
             for file_str in self.config.files:
-                reco_sub = self.config.dag_recosub(it, file_str)
                 reco_job = self.config.dag_recojob(it, file_str)
                 dag_content += f"JOB {reco_job} {reco_sub}\n"
-            # mille jobs
-            dag_content += f"\n# Iteration {it} millepede job\n"
-            mille_sub = self.config.dag_millesub(it)
-            mille_job = self.config.dag_millejob(it)
-            dag_content += f"JOB {mille_job} {mille_sub}\n"
-            # add dependencies
+                dag_content += f"VARS {reco_job} file_str=\"{file_str}\"\n"
+
+            # ---- millepede steps ----
+            dag_content += f"\n# Iteration {it} millepede jobs\n"
+            for step_name in step_names:
+                mille_sub = self.config.dag_millesub(it, step_name)
+                mille_job = self.config.dag_millejob(it, step_name)
+                dag_content += f"JOB {mille_job} {mille_sub}\n"
+
+            # ---- dependencies ----
             dag_content += f"\n# Iteration {it} dependencies\n"
+            first_mille = self.config.dag_millejob(it, step_names[0])
+            # every reco file job → first mille step
             for file_str in self.config.files:
                 reco_job = self.config.dag_recojob(it, file_str)
-                dag_content += f"PARENT {reco_job} CHILD {mille_job}\n"
-                if it != 0:
-                    last_mille_job = self.config.dag_millejob(it-1)
-                    dag_content += f"PARENT {last_mille_job} CHILD {reco_job}\n"
+                dag_content += f"PARENT {reco_job} CHILD {first_mille}\n"
+            # mille step[k] → mille step[k+1]
+            for k in range(len(step_names) - 1):
+                parent_j = self.config.dag_millejob(it, step_names[k])
+                child_j  = self.config.dag_millejob(it, step_names[k + 1])
+                dag_content += f"PARENT {parent_j} CHILD {child_j}\n"
+            # previous iteration's last mille → all current reco jobs
+            if it != 0:
+                prev_ws, _ = self.config.iter_info(it - 1)
+                prev_steps = list(prev_ws.pede_steps.keys())
+                last_mille = self.config.dag_millejob(it - 1, prev_steps[-1])
+                for file_str in self.config.files:
+                    reco_job = self.config.dag_recojob(it, file_str)
+                    dag_content += f"PARENT {last_mille} CHILD {reco_job}\n"
             dag_content += "\n"
+
         # Add retry settings
         dag_content += "# Retry settings\n"
-        for it in range(self.config.iters):
+        for it in range(total):
+            ws, _ = self.config.iter_info(it)
             for file_str in self.config.files:
                 reco_job = self.config.dag_recojob(it, file_str)
                 dag_content += f"RETRY {reco_job} 2\n"
-            mille_job = self.config.dag_millejob(it)
-            dag_content += f"RETRY {mille_job} 1\n"
+            for step_name in ws.pede_steps.keys():
+                mille_job = self.config.dag_millejob(it, step_name)
+                dag_content += f"RETRY {mille_job} 1\n"
+
         # Write DAG file
         if dag_file.exists():
             ColorfulPrint.print_yellow(f"Warning: ")
@@ -187,18 +226,6 @@ def main():
         description="Generate HTCondor DAG for FASER alignment workflow"
     )
     
-    # parser.add_argument('--year', '-y', type=str, required=True,
-    #                     help='Year (e.g., 2022-2025)')
-    # parser.add_argument('--run', '-r', type=str, required=True,
-    #                     help='Run number (e.g., 011705, will be padded to 6 digits)')
-    # parser.add_argument('--files', '-f', type=str, required=True,
-    #                     help='Raw file number or range (e.g., 400, 400-500, 400:500)')
-    # parser.add_argument('--iterations', '-i', type=int, required=True,
-    #                     help='Number of iterations to perform')
-    # parser.add_argument('--fourst', action='store_true', default=False,
-    #                     help='Enable 4-station mode')
-    # parser.add_argument('--threest', action='store_true', default=True,
-    #                     help='Enable 3-station mode')
     parser.add_argument('--config', type=str, default='config.json',
                         help='Path to configuration file')
     parser.add_argument('--submit', action='store_true', default=False,
