@@ -20,22 +20,143 @@ The daemon approach using `auto_iter.py` with `nohup` is **not officially suppor
 
 ## Migration Steps
 
+### Prerequisites
+
+Before migrating, ensure you have:
+- [ ] Access to CERN lxplus
+- [ ] Calypso installed and accessible
+- [ ] Pede installed (see installation instructions below)
+- [ ] Sufficient storage quota (AFS: ~500MB, EOS: ~25GB for 10 iterations)
+- [ ] Stopped any running `auto_iter.py` daemon processes
+
+**Check for running daemons:**
+```bash
+# Find any auto_iter.py processes
+ps aux | grep auto_iter.py
+
+# If found, note the PID and stop it:
+kill <pid>
+
+# Verify it's stopped
+ps aux | grep auto_iter.py
+```
+
 ### Step 1: Initial Setup
 
-**Create configuration file:**
+**1.1 Create configuration file:**
 
 ```bash
-# Interactive setup (recommended)
+# Method 1: Interactive setup (recommended for first-time users)
 bash setup_config.sh
+# Follow the prompts to enter your paths
 
-# Or manual setup
+# Method 2: Manual setup (for experienced users)
 python3 config.py
 # Then edit config.json with your paths
+nano config.json
+```
+
+**1.2 Verify configuration:**
+
+```bash
+# Validate paths and settings
+python3 -c "from config import AlignmentConfig; c = AlignmentConfig(); c.validate_paths()"
+
+# Check configuration contents
+cat config.json
+```
+
+**1.3 Example config.json:**
+```json
+{
+  "paths": {
+    "calypso_install": "/afs/cern.ch/user/y/yourusername/calypso/install",
+    "pede_install": "/afs/cern.ch/user/y/yourusername/pede",
+    "env_script": "reco_condor_env.sh",
+    "work_dir": "/afs/cern.ch/user/y/yourusername/alignment-work",
+    "eos_output_dir": "/eos/user/y/yourusername/faser-alignment-output"
+  },
+  "htcondor": {
+    "job_flavour": "longlunch",
+    "request_cpus": 1,
+    "max_retries": 3,
+    "requirements": "(Machine =!= LastRemoteHost) && (OpSysAndVer =?= \"AlmaLinux9\")"
+  },
+  "storage": {
+    "use_eos_for_output": true,
+    "keep_intermediate_root_files": true,
+    "cleanup_reco_temp_files": true
+  },
+  "alignment": {
+    "default_iterations": 10,
+    "polling_interval_seconds": 300
+  }
+}
 ```
 
 The configuration file replaces hardcoded paths in `auto_iter.py`.
 
-### Step 2: Convert Your Command
+### Step 2: Install/Verify Dependencies
+
+**2.1 Verify Calypso installation:**
+```bash
+# Check if Calypso is accessible
+ls -la /afs/cern.ch/user/y/yourusername/calypso/install/
+
+# Verify setup script exists
+ls -la /afs/cern.ch/user/y/yourusername/calypso/install/setup.sh
+```
+
+**2.2 Install pede (if not already installed):**
+```bash
+# Clone pede repository
+git clone --depth 1 --branch V04-17-06 \
+     https://gitlab.desy.de/claus.kleinwort/millepede-ii.git \
+     /afs/cern.ch/user/y/yourusername/pede
+
+# Build pede
+cd /afs/cern.ch/user/y/yourusername/pede
+make pede
+
+# Test installation
+./pede -t
+# Should complete successfully with test output
+
+# Return to work directory
+cd -
+```
+
+**2.3 Compile Mille:**
+```bash
+cd /afs/cern.ch/user/y/yourusername/faser-alignment-script/millepede
+cmake -B build && cmake --build build && cmake --install build
+cd -
+```
+
+**2.4 Create/verify environment script:**
+```bash
+# If it doesn't exist, create it:
+cat > reco_condor_env.sh << 'EOF'
+#!/bin/bash
+export ATLAS_LOCAL_ROOT_BASE=/cvmfs/atlas.cern.ch/repo/ATLASLocalRootBase
+source ${ATLAS_LOCAL_ROOT_BASE}/user/atlasLocalSetup.sh
+asetup --input=calypso/asetup.faser Athena,24.0.41
+source /afs/cern.ch/user/y/yourusername/calypso/install/setup.sh
+export PATH=/afs/cern.ch/user/y/yourusername/pede:$PATH
+export LD_LIBRARY_PATH=/afs/cern.ch/user/y/yourusername/pede:$LD_LIBRARY_PATH
+EOF
+
+chmod +x reco_condor_env.sh
+
+# Test the environment script
+source reco_condor_env.sh
+which pede
+# Should output: /afs/cern.ch/user/y/yourusername/pede/pede
+```
+
+### Step 3: Convert Your Command
+
+Now you can convert your old daemon command to the new DAGman approach.
 
 **Old command:**
 ```bash
@@ -47,7 +168,32 @@ nohup python3 auto_iter.py -y 2023 -r 011705 -f 450-500 -i 10 &>>auto_iter.log &
 python3 dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
 ```
 
-### Step 3: Command-Line Arguments
+**What changed:**
+- ❌ Removed `nohup` - No longer needed, DAGman manages the workflow
+- ❌ Removed `&>>auto_iter.log &` - DAGman has its own logging
+- ✅ Changed script from `auto_iter.py` to `dag_manager.py`
+- ✅ Added `--submit` flag - Automatically submits the DAG after generation
+- ✅ All other arguments remain the same
+
+**First migration (test run):**
+```bash
+# Start with a small test to verify everything works
+python3 dag_manager.py -y 2023 -r 011705 -f 450-453 -i 2 --submit
+
+# Monitor the test
+condor_q -dag
+
+# Check logs
+tail -f Y2023_R011705_F450-453/alignment.dag.dagman.out
+```
+
+**After successful test:**
+```bash
+# Run full production workflow
+python3 dag_manager.py -y 2023 -r 011705 -f 450-500 -i 10 --submit
+```
+
+### Step 4: Command-Line Arguments
 
 All arguments remain the same:
 
@@ -64,33 +210,71 @@ All arguments remain the same:
 - `--config`: Specify custom config file
 - `--submit`: Automatically submit DAG after generation
 
-### Step 4: Monitor Your Jobs
+### Step 5: Monitor Your Jobs
 
-**Old approach:**
+The monitoring approach is completely different and much more powerful with DAGman.
+
+**Old approach (daemon-based):**
 ```bash
 # Monitor daemon log
 tail -f auto_iter.log
 
 # Check if daemon is running
 ps aux | grep auto_iter.py
+
+# No structured view of workflow progress
+# Manual log parsing required
 ```
 
-**New approach:**
+**New approach (DAGman-based):**
 ```bash
-# Check overall status
+# 1. Check overall job status
 condor_q
 
-# View detailed DAG status
+# Example output:
+# -- Schedd: lxplus123.cern.ch : <188.185.123.123:9618?... @ 12/15/23 14:30:21
+# OWNER    BATCH_NAME       SUBMITTED   DONE   RUN    IDLE  TOTAL JOB_IDS
+# username alignment.dag   12/15 14:28      5      3      2     10 12345.0 ... 12354.0
+
+# 2. View detailed DAG structure and node status
 condor_q -dag
 
-# Monitor DAGman log
+# Example output:
+# ID       OWNER      DAG_NodeName          STATUS
+# 12345.0  username   reco_01_0            DONE
+# 12345.1  username   reco_01_1            DONE
+# 12345.2  username   reco_01_2            RUNNING
+# 12345.3  username   millepede_01         IDLE
+# 12345.4  username   reco_02_0            IDLE
+
+# 3. View jobs without batching (detailed view)
+condor_q -nobatch
+
+# 4. Monitor DAGman log in real-time
 tail -f Y2023_R011705_F450-500/alignment.dag.dagman.out
 
-# Check job history
-condor_history <username>
+# 5. Check job history (completed jobs)
+condor_history <username> -limit 20
+
+# 6. Check specific job details
+condor_q -long <job_id>
+
+# 7. Check only running jobs
+condor_q -run
+
+# 8. Check only idle jobs
+condor_q -idle
 ```
 
-### Step 5: Handle Issues
+**Benefits of new monitoring:**
+- ✅ Real-time workflow visualization
+- ✅ Clear parent-child job relationships
+- ✅ Per-iteration status tracking
+- ✅ Built-in HTCondor tools
+- ✅ Standard logging format
+- ✅ Easy troubleshooting
+
+### Step 6: Handle Issues
 
 **Old approach:**
 ```bash
